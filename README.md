@@ -15,7 +15,7 @@ The provided Test.c is just a small simple http get request sender.
 Usage - 
 
 - NFD should be running in background.
-- The route for the server needs to be setup in this case "/ndn-test/test/*" (* is the actual URL).
+- The route for the server needs to be setup in this case "/ndn-test/test/\*" (\* is the actual URL).
 - The server should be accepting "/ndn-test/test/*"
 - Also requires a trust-schema.conf (See ndn-cxx to know more) file to get the server's public key. (Currently hardcoded to "../../trust-schema.conf")
  
