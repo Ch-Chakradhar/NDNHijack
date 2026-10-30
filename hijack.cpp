@@ -66,7 +66,7 @@ static std::string fetch_ndn_data(const std::string& host, const std::string& pa
         ndn::ValidatorConfig validator{face};
         bool validator_loaded = false;
         try {
-            validator.load("../trust-schema.conf");
+            validator.load("../../trust-schema.conf");
             validator_loaded = true;
         } catch (const std::exception& e) {
             std::cerr << "[NDN_HIJACK] Warning: Failed to load trust-schema.conf: " << e.what() << std::endl;
