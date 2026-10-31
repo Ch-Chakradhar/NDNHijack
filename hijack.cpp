@@ -3,6 +3,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netdb.h>
 #include <unistd.h>
 
 #include <iostream>
@@ -14,36 +15,47 @@
 #include <ndn-cxx/face.hpp>
 #include <ndn-cxx/security/validator-config.hpp>
 
+using getaddrinfo_func = int (*)(const char *node, const char *service,
+                                 const struct addrinfo *hints,
+                                 struct addrinfo **res);
 using connect_func = int (*)(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
 using send_func = ssize_t (*)(int socket, const void *buffer, size_t length, int flags);
 using close_func = int (*)(int fd);
 
+static getaddrinfo_func orig_getaddrinfo = nullptr;
 static connect_func orig_connect = nullptr;
 static send_func orig_send = nullptr;
 static close_func orig_close = nullptr;
 
-
-// Prevents intercepting ndn-cxx internal sockets to NFD
-thread_local bool g_in_ndn = false;
-
-struct NdnGuard {
-    NdnGuard() { g_in_ndn = true; }
-    ~NdnGuard() { g_in_ndn = false; }
-};
-
 struct HijackedSocket {
     int peer_fd;
-    std::string ip;
-    uint16_t port;
+    std::string host;
 };
 
+static std::mutex g_state_mutex;
+static std::map<std::string, std::string> g_ip_to_host;
 static std::map<int, HijackedSocket> g_hijacked_sockets;
-static std::mutex g_sockets_mutex;
+static int g_next_ip_suffix = 2; // generates 127.0.0.2, 127.0.0.3, ...
 
 static void init_net_functions() {
+    if (!orig_getaddrinfo) orig_getaddrinfo = (getaddrinfo_func)dlsym(RTLD_NEXT, "getaddrinfo");
     if (!orig_connect) orig_connect = (connect_func)dlsym(RTLD_NEXT, "connect");
     if (!orig_send) orig_send = (send_func)dlsym(RTLD_NEXT, "send");
     if (!orig_close) orig_close = (close_func)dlsym(RTLD_NEXT, "close");
+}
+
+static std::string allocate_dummy_ip(const std::string& host) {
+    std::lock_guard<std::mutex> lock(g_state_mutex);
+
+    for (const auto& pair : g_ip_to_host) {
+        if (pair.second == host) {
+            return pair.first;
+        }
+    }
+
+    std::string ip = "127.0.0." + std::to_string(g_next_ip_suffix++);
+    g_ip_to_host[ip] = host;
+    return ip;
 }
 
 static std::string fetch_ndn_data(const std::string& host, const std::string& path) {
@@ -123,28 +135,73 @@ static std::string fetch_ndn_data(const std::string& host, const std::string& pa
     return response;
 }
 
+int getaddrinfo(const char *node, const char *service,
+                const struct addrinfo *hints,
+                struct addrinfo **res) {
+    init_net_functions();
+
+    if (!node) {
+        return orig_getaddrinfo(node, service, hints, res);
+    }
+
+    std::string dummy_ip = allocate_dummy_ip(node);
+
+    struct addrinfo *ai = (struct addrinfo *)calloc(1, sizeof(struct addrinfo));
+    struct sockaddr_in *sa = (struct sockaddr_in *)calloc(1, sizeof(struct sockaddr_in));
+    if (!ai || !sa) {
+        free(ai);
+        free(sa);
+        return EAI_MEMORY;
+    }
+
+    int port = 80;
+    if (service) {
+        port = atoi(service);
+    }
+
+    sa->sin_family = AF_INET;
+    sa->sin_port = htons(port);
+    inet_pton(AF_INET, dummy_ip.c_str(), &sa->sin_addr);
+
+    ai->ai_family = AF_INET;
+    ai->ai_socktype = hints ? hints->ai_socktype : SOCK_STREAM;
+    ai->ai_protocol = hints ? hints->ai_protocol : IPPROTO_TCP;
+    ai->ai_addrlen = sizeof(struct sockaddr_in);
+    ai->ai_addr = (struct sockaddr *)sa;
+    ai->ai_canonname = nullptr;
+    ai->ai_next = nullptr;
+
+    *res = ai;
+    return 0;
+}
+
 int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     init_net_functions();
 
-    if (g_in_ndn || addr == nullptr || addr->sa_family != AF_INET) {
+    if (addr == nullptr || addr->sa_family != AF_INET) {
         return orig_connect(sockfd, addr, addrlen);
     }
 
     const struct sockaddr_in *in = (const struct sockaddr_in *)addr;
-    uint16_t port = ntohs(in->sin_port);
-    if (port == 6363) {
-        return orig_connect(sockfd, addr, addrlen);
-    }
-
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &(in->sin_addr), ip, sizeof(ip));
+
+    std::string host;
+    {
+        std::lock_guard<std::mutex> lock(g_state_mutex);
+        auto it = g_ip_to_host.find(ip);
+        if (it == g_ip_to_host.end()) {
+            return orig_connect(sockfd, addr, addrlen);
+        }
+        host = it->second;
+    }
 
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
         return orig_connect(sockfd, addr, addrlen);
     }
 
-    // Replace original TCP sockfd with sv[0]
+    // Replace TCP socket with the read end of the socketpair
     if (dup2(sv[0], sockfd) < 0) {
         close(sv[0]);
         close(sv[1]);
@@ -154,11 +211,10 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
 
     HijackedSocket info;
     info.peer_fd = sv[1];
-    info.ip = ip;
-    info.port = port;
+    info.host = host;
 
     {
-        std::lock_guard<std::mutex> lock(g_sockets_mutex);
+        std::lock_guard<std::mutex> lock(g_state_mutex);
         g_hijacked_sockets[sockfd] = info;
     }
 
@@ -168,14 +224,10 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
 ssize_t send(int sockfd, const void *buffer, size_t length, int flags) {
     init_net_functions();
 
-    if (g_in_ndn) {
-        return orig_send(sockfd, buffer, length, flags);
-    }
-
     HijackedSocket info;
     bool is_hijacked = false;
     {
-        std::lock_guard<std::mutex> lock(g_sockets_mutex);
+        std::lock_guard<std::mutex> lock(g_state_mutex);
         auto it = g_hijacked_sockets.find(sockfd);
         if (it != g_hijacked_sockets.end()) {
             info = it->second;
@@ -190,7 +242,6 @@ ssize_t send(int sockfd, const void *buffer, size_t length, int flags) {
 
     std::string req(static_cast<const char*>(buffer), length);
     std::string path = "/";
-    std::string host;
 
     size_t first_space = req.find(' ');
     if (first_space != std::string::npos) {
@@ -200,33 +251,7 @@ ssize_t send(int sockfd, const void *buffer, size_t length, int flags) {
         }
     }
 
-    size_t host_pos = req.find("Host:");
-    if (host_pos == std::string::npos) {
-        host_pos = req.find("host:");
-    }
-    if (host_pos != std::string::npos) {
-        size_t val_start = host_pos + 5;
-        while (val_start < req.size() && (req[val_start] == ' ' || req[val_start] == '\t')) {
-            val_start++;
-        }
-        size_t line_end = req.find_first_of("\r\n", val_start);
-        host = (line_end != std::string::npos) ? req.substr(val_start, line_end - val_start)
-                                               : req.substr(val_start);
-        size_t colon = host.find(':');
-        if (colon != std::string::npos) {
-            host = host.substr(0, colon);
-        }
-    }
-
-    if (host.empty()) {
-        host = info.ip;
-    }
-
-    std::string response;
-    {
-        NdnGuard guard;
-        response = fetch_ndn_data(host, path);
-    }
+    std::string response = fetch_ndn_data(info.host, path);
 
     if (!response.empty()) {
         const char *data_ptr = response.data();
@@ -239,7 +264,7 @@ ssize_t send(int sockfd, const void *buffer, size_t length, int flags) {
         }
     }
 
-    // Close peer_fd so caller's recv() hits EOF when buffer is drained
+    // Close peer_fd so caller's recv() reaches EOF after reading the response
     close(info.peer_fd);
 
     return length;
@@ -250,7 +275,7 @@ int close(int fd) {
 
     int peer_to_close = -1;
     {
-        std::lock_guard<std::mutex> lock(g_sockets_mutex);
+        std::lock_guard<std::mutex> lock(g_state_mutex);
         auto it = g_hijacked_sockets.find(fd);
         if (it != g_hijacked_sockets.end()) {
             peer_to_close = it->second.peer_fd;
