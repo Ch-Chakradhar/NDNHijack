@@ -18,6 +18,7 @@ The provided Test.c is just a small simple http get request sender.
 - The route for the server needs to be setup in this case "/ndn-test/test/\*" (\* is the actual URL).
 - The server should be accepting "/ndn-test/test/*"
 - Also requires a trust-schema.conf (See ndn-cxx to know more) file to get the server's public key. (Currently hardcoded to "../../trust-schema.conf")
+- Currently works only for HTTP requests.
  
 ```bash
     LD_PRELOAD=./hijack.so wget http://httpforever.com/
@@ -47,3 +48,9 @@ The hijack.cpp file currently hijacks 4 POSIX system calls
 
 ### Close
 It is hijacked only for the cleanup of the hijacked sockets and then the original close is called
+
+### NDN Workflow
+Expresses interest for the current URL and if the result they get is segmented into different data packets then the ndn-cxx SegmentFetcher is used to get the entire response.
+
+### Server
+The server-side just uses libcurl to get the queried URL and then if it is less than the NDN data packet size it is sent as a single data packet or else it is segmented and the interest sender's end would send requests for each segment which are stored in C++ map and sent over to the client.
