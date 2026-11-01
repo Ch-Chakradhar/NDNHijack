@@ -1,3 +1,6 @@
+#ifndef HTTP_PREFIX
+#error "Compilation failed - HTTP_PREFIX should be defined"
+#endif
 #include <ndn-cxx/face.hpp>
 #include <ndn-cxx/security/key-chain.hpp>
 #include <ndn-cxx/security/signing-helpers.hpp>
@@ -58,8 +61,14 @@ void onInterest(const InterestFilter& interest_filter, const Interest& interest)
         return;
     }
 
-    size_t host_idx = (name.size() > 2 && name.get(1).toUri() == "test") ? 2 : 1;
-    std::string host = name.size() > host_idx ? name.get(host_idx).toUri() : "unknown";
+    Name prefix(HTTP_PREFIX);
+    size_t host_idx = prefix.size();
+
+    if (name.size() <= host_idx) {
+        std::cerr << "Interest name does not contain a host: " << name << std::endl;
+        return;
+    }
+    std::string host = name.get(host_idx).toUri();
     std::string path = "/";
     for (size_t i = host_idx + 1; i < name.size(); ++i) {
         path += name.get(i).toUri();
@@ -112,7 +121,7 @@ void onInterest(const InterestFilter& interest_filter, const Interest& interest)
 
 int main(int argc, char** argv) {
     curl_global_init(CURL_GLOBAL_ALL);
-    m_face.setInterestFilter("/ndn-test/test", onInterest,
+    m_face.setInterestFilter(HTTP_PREFIX, onInterest,
         [](const Name& prefix, const std::string& reason) {
             std::cerr << "Failed to register prefix " << prefix << ": " << reason << std::endl;
         }

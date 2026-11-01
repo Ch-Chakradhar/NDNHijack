@@ -1,2 +1,4 @@
 hijack.so
-test.out
+defaults/*.cert
+Test
+index.html

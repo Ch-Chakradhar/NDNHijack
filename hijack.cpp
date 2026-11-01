@@ -1,3 +1,6 @@
+#ifndef HTTP_PREFIX
+#error "Compilation failed - HTTP_PREFIX should be defined"
+#endif
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <sys/socket.h>
@@ -64,7 +67,7 @@ static std::string allocate_dummy_ip(const std::string& host) {
 }
 
 static std::string fetch_ndn_data(const std::string& host, const std::string& path) {
-    ndn::Name interest_name("/ndn-test/test");
+    ndn::Name interest_name(HTTP_PREFIX);
     interest_name.append(host);
 
     std::stringstream ss(path);
@@ -83,7 +86,7 @@ static std::string fetch_ndn_data(const std::string& host, const std::string& pa
         ndn::ValidatorConfig validator{face};
         bool validator_loaded = false;
         try {
-            validator.load("../../trust-schema.conf");
+            validator.load("defaults/trust-schema.conf");
             validator_loaded = true;
         } catch (const std::exception& e) {
             std::cerr << "[NDN_HIJACK] Warning: Failed to load trust-schema.conf: " << e.what() << std::endl;
