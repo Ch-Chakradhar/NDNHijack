@@ -14,6 +14,7 @@
 
 #include <ndn-cxx/face.hpp>
 #include <ndn-cxx/security/validator-config.hpp>
+#include <ndn-cxx/util/segment-fetcher.hpp>
 
 using getaddrinfo_func = int (*)(const char *node, const char *service,
                                  const struct addrinfo *hints,
@@ -95,26 +96,43 @@ static std::string fetch_ndn_data(const std::string& host, const std::string& pa
 
         std::cout << "[NDN_HIJACK] Expressing Interest: " << interest.getName().toUri() << std::endl;
 
+        std::shared_ptr<ndn::SegmentFetcher> fetcher;
+
         face.expressInterest(
             interest,
             [&](const ndn::Interest&, const ndn::Data& data) {
-                if (validator_loaded) {
-                    validator.validate(
-                        data,
-                        [&](const ndn::Data& valid_data) {
-                            response.assign(reinterpret_cast<const char*>(valid_data.getContent().value()),
-                                            valid_data.getContent().value_size());
-                            done = true;
-                        },
-                        [&](const ndn::Data&, const ndn::security::ValidationError& error) {
-                            std::cerr << "[NDN_HIJACK] Validation error: " << error << std::endl;
-                            response = "HTTP/1.0 502 Bad Gateway\r\n\r\nNDN Data Validation Error\r\n";
-                            done = true;
-                        });
+                // If data is segmented, use SegmentFetcher to retrieve and reassemble all chunks
+                if (!data.getName().empty() && data.getName().get(-1).isSegment()) {
+                    fetcher = ndn::SegmentFetcher::start(face, interest, validator);
+                    fetcher->onComplete.connect([&](ndn::ConstBufferPtr buffer) {
+                        response.assign(reinterpret_cast<const char*>(buffer->data()), buffer->size());
+                        done = true;
+                    });
+                    fetcher->onError.connect([&](uint32_t code, const std::string& msg) {
+                        std::cerr << "[NDN_HIJACK] SegmentFetcher error (" << code << "): " << msg << std::endl;
+                        response = "HTTP/1.0 502 Bad Gateway\r\n\r\nNDN Segment Fetch Error: " + msg + "\r\n";
+                        done = true;
+                    });
                 } else {
-                    response.assign(reinterpret_cast<const char*>(data.getContent().value()),
-                                    data.getContent().value_size());
-                    done = true;
+                    // Single unsegmented Data packet
+                    if (validator_loaded) {
+                        validator.validate(
+                            data,
+                            [&](const ndn::Data& valid_data) {
+                                response.assign(reinterpret_cast<const char*>(valid_data.getContent().value()),
+                                                valid_data.getContent().value_size());
+                                done = true;
+                            },
+                            [&](const ndn::Data&, const ndn::security::ValidationError& error) {
+                                std::cerr << "[NDN_HIJACK] Validation error: " << error << std::endl;
+                                response = "HTTP/1.0 502 Bad Gateway\r\n\r\nNDN Data Validation Error\r\n";
+                                done = true;
+                            });
+                    } else {
+                        response.assign(reinterpret_cast<const char*>(data.getContent().value()),
+                                        data.getContent().value_size());
+                        done = true;
+                    }
                 }
             },
             [&](const ndn::Interest&, const ndn::lp::Nack& nack) {
@@ -246,13 +264,15 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     inet_ntop(AF_INET, &(in->sin_addr), ip, sizeof(ip));
 
     std::string host;
+    bool is_hijacked = false;
     {
         std::lock_guard<std::mutex> lock(g_state_mutex);
         auto it = g_ip_to_host.find(ip);
-        if (it == g_ip_to_host.end()) {
-            return orig_connect(sockfd, addr, addrlen);
-        }
-        host = it->second;
+        is_hijacked = (it != g_ip_to_host.end());
+        if(is_hijacked) host = it->second;
+    }
+    if(!is_hijacked){
+        return orig_connect(sockfd, addr, addrlen);
     }
 
     int sv[2];
