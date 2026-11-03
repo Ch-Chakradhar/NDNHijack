@@ -1,23 +1,22 @@
 # NDN Hijack Library
 
 Requires [ndn-cxx](https://github.com/named-data/ndn-cxx) libraries to be installed on the system.
+Requires lib-curl on the server machine.
 
 ## Building - 
 ```bash
-  g++ -std=c++17 -Wall -shared -fPIC -o hijack.so hijack.cpp \
-    -I/usr/local/include -L/usr/local/lib \
-    -DBOOST_STACKTRACE_DYN_LINK -DBOOST_LOG_DYN_LINK \
-    -lndn-cxx -lboost_chrono -lboost_log -lboost_thread -lboost_stacktrace_backtrace \
-    -lcrypto -lsqlite3 -latomic -lrt -lpthread -ldl
+  python3 setup.py #[server | client]
+  #server - For building the Server which relays the requests to curl to get the response
+  #client - For building the client side hijack shared library
 ```
 The provided Test.c is just a small simple http get request sender.
 
 ## Usage - 
 
 - NFD should be running in background.
-- The route for the server needs to be setup in this case "/ndn-test/test/\*" (\* is the actual URL).
-- The server should be accepting "/ndn-test/test/*"
-- Also requires a trust-schema.conf (See ndn-cxx to know more) file to get the server's public key. (Currently hardcoded to "../../trust-schema.conf")
+- The route for the server needs to be setup in this case "HTTP_PREFIX/\*" (\* is the actual URL).
+- The server should be accepting "HTTP_PREFIX/*" (Makefile handles this)
+- Also requires a trust-schema config file (See ndn-cxx to know more) file to get the server's public key. (Currently an example file in defaults is used)
 - Currently works only for HTTP requests.
  
 ```bash
